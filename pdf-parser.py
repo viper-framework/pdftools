@@ -1405,7 +1405,7 @@ def Main():
                         elif options.hash:
                             print('obj %d %d' % (object.id, object.version))
                             rawContent = FormatOutput(object.content, True)
-                            print(' len: %d md5: %s' % (len(rawContent), hashlib.md5(rawContent).hexdigest()))
+                            print(' len: %d md5: %s' % (len(rawContent), hashlib.md5(rawContent.encode()).hexdigest()))
                             print('')
                         elif options.searchstream:
                             if object.StreamContains(options.searchstream, not options.unfiltered, options.casesensitive, options.regex):
@@ -1447,8 +1447,7 @@ def Main():
             print('StartXref: %s' % cntStartXref)
             print('Indirect object: %s' % cntIndirectObject)
             names = dicObjectTypes.keys()
-            names.sort()
-            for key in names:
+            for key in sorted(names):
                 print(' %s %d: %s' % (key, len(dicObjectTypes[key]), ', '.join(map(lambda x: '%d' % x, dicObjectTypes[key]))))
 
         if options.generate or options.generateembedded != 0:
