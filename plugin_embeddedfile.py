@@ -1,7 +1,6 @@
 #!/usr/bin/env python
 
 #2014/10/13
-from .pdfid import cPluginParent, AddPlugin
 
 class cPDFiDEmbeddedFile(cPluginParent):
 #    onlyValidPDF = True

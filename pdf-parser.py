@@ -2,10 +2,10 @@
 
 __description__ = 'pdf-parser, use it to parse a PDF document'
 __author__ = 'Didier Stevens'
-__version__ = '0.6.7'
-__date__ = '2016/12/17'
+__version__ = '0.7.4'
+__date__ = '2019/11/05'
 __minimum_python_version__ = (2, 5, 1)
-__maximum_python_version__ = (3, 4, 3)
+__maximum_python_version__ = (3, 7, 5)
 
 """
 Source code put in public domain by Didier Stevens, no Copyright
@@ -58,6 +58,17 @@ History:
   2016/07/27: V0.6.5 bugfix whitespace 0x00 0x0C after stream 0x0D 0x0A reported by @mr_me
   2016/11/20: V0.6.6 added workaround zlib errors FlateDecode
   2016/12/17: V0.6.7 added option -k
+  2017/01/07: V0.6.8 changed cPDFParseDictionary to handle strings () with % character
+  2017/10/28: fixed bug
+  2017/10/29: added # support for option -y
+  2018/06/29: V0.6.9 added option --overridingfilters
+  2018/10/20: added keywords to statistics
+  2019/02/22: V0.7.0 added option -O --objstm to parse the stream of /ObjStm objects, inspired by a contributor wishing anonymity
+  2019/03/01: V0.7.1 added ContainsName for correct keyword statistics (-a)
+  2019/04/12: V0.7.2 Python 2.6.6 compatibility fix
+  2019/07/30: bug fixes (including fixes Josef Hinteregger)
+  2019/09/26: V0.7.3 added multiple id selection to option -o; added man page (-m); added environment variable PDFPARSER_OPTIONS; bug fixes
+  2019/11/05: V0.7.4 fixed plugin path when compiled with pyinstaller, replaced eval with int
 
 Todo:
   - handle printf todo
@@ -74,14 +85,17 @@ import sys
 import zipfile
 import time
 import os
+import textwrap
 if sys.version_info[0] >= 3:
     from io import StringIO
     import urllib.request
     urllib23 = urllib.request
+    import configparser as ConfigParser
 else:
     from cStringIO import StringIO
     import urllib2
     urllib23 = urllib2
+    import ConfigParser
 try:
     import yara
 except:
@@ -105,12 +119,43 @@ PDF_ELEMENT_MALFORMED = 6
 
 dumplinelength = 16
 
+def PrintManual():
+    manual = '''
+Manual:
+
+This manual is a work in progress.
+
+There is a free PDF analysis book:
+https://blog.didierstevens.com/2010/09/26/free-malicious-pdf-analysis-e-book/
+
+Option -o is used to select objects by id. Provide a single id or multiple ids separated by a comma (,).
+
+When environment variable PDFPARSER_OPTIONS is defined, the options it defines are added implicitely to the command line arguments.
+Use this to define options you want included with each use of pdf-parser.py.
+Like option -O, to parse stream objects (/ObjStm).
+By defining PDFPARSER_OPTIONS=-O, pdf-parser will always parse stream objects (when found).
+PS: this feature is experimental.
+
+'''
+    for line in manual.split('\n'):
+        print(textwrap.fill(line))
+
 #Convert 2 Bytes If Python 3
 def C2BIP3(string):
     if sys.version_info[0] > 2:
-        return bytes([ord(x) for x in string])
+        if type(string) == bytes:
+            return string
+        else:
+            return bytes([ord(x) for x in string])
     else:
         return string
+
+#Convert 2 String If Python 3
+def C2SIP3(bytes):
+    if sys.version_info[0] > 2:
+        return ''.join([chr(byte) for byte in bytes])
+    else:
+        return bytes
 
 # CIC: Call If Callable
 def CIC(expression):
@@ -146,7 +191,9 @@ def Obj2Str(content):
 class cPDFDocument:
     def __init__(self, file):
         self.file = file
-        if file.lower().startswith('http://') or file.lower().startswith('https://'):
+        if type(file) != str:
+            self.infile = file
+        elif file.lower().startswith('http://') or file.lower().startswith('https://'):
             try:
                 if sys.hexversion >= 0x020601F0:
                     self.infile = urllib23.urlopen(file, timeout=5)
@@ -275,16 +322,25 @@ class cPDFTokenizer:
             token = self.Token()
         return token
 
+    def Tokens(self):
+        tokens = []
+        token = self.Token()
+        while token != None:
+            tokens.append(token)
+            token = self.Token()
+        return tokens
+
     def unget(self, byte):
         self.ungetted.append(byte)
 
 class cPDFParser:
-    def __init__(self, file, verbose=False, extract=None):
+    def __init__(self, file, verbose=False, extract=None, objstm=None):
         self.context = CONTEXT_NONE
         self.content = []
         self.oPDFTokenizer = cPDFTokenizer(file)
         self.verbose = verbose
         self.extract = extract
+        self.objstm = objstm
 
     def GetObject(self):
         while True:
@@ -324,7 +380,7 @@ class cPDFParser:
                 else:
                     if self.context == CONTEXT_OBJ:
                         if self.token[1] == 'endobj':
-                            self.oPDFElementIndirectObject = cPDFElementIndirectObject(self.objectId, self.objectVersion, self.content)
+                            self.oPDFElementIndirectObject = cPDFElementIndirectObject(self.objectId, self.objectVersion, self.content, self.objstm)
                             self.context = CONTEXT_NONE
                             self.content = []
                             return self.oPDFElementIndirectObject
@@ -354,8 +410,8 @@ class cPDFParser:
                             if IsNumeric(self.token2[1]):
                                 self.token3 = self.oPDFTokenizer.TokenIgnoreWhiteSpace()
                                 if self.token3[1] == 'obj':
-                                    self.objectId = eval(self.token[1])
-                                    self.objectVersion = eval(self.token2[1])
+                                    self.objectId = int(self.token[1], 10)
+                                    self.objectVersion = int(self.token2[1], 10)
                                     self.context = CONTEXT_OBJ
                                 else:
                                     self.oPDFTokenizer.unget(self.token3)
@@ -375,7 +431,7 @@ class cPDFParser:
                         elif self.token[1] == 'startxref':
                             self.token2 = self.oPDFTokenizer.TokenIgnoreWhiteSpace()
                             if self.token2 and IsNumeric(self.token2[1]):
-                                return cPDFElementStartxref(eval(self.token2[1]))
+                                return cPDFElementStartxref(int(self.token2[1], 10))
                             else:
                                 self.oPDFTokenizer.unget(self.token2)
                                 if self.verbose:
@@ -426,11 +482,12 @@ def IIf(expr, truepart, falsepart):
         return falsepart
 
 class cPDFElementIndirectObject:
-    def __init__(self, id, version, content):
+    def __init__(self, id, version, content, objstm=None):
         self.type = PDF_ELEMENT_INDIRECT_OBJECT
         self.id = id
         self.version = version
         self.content = content
+        self.objstm = objstm
         #fix stream for Ghostscript bug reported by Kurt
         if self.ContainsStream():
             position = len(self.content) - 1
@@ -489,12 +546,20 @@ class cPDFElementIndirectObject:
                 data += Canonicalize(self.content[i][1])
         return data.upper().find(keyword.upper()) != -1
 
-    def StreamContains(self, keyword, filter, casesensitive, regex):
+    def ContainsName(self, keyword):
+        for token in self.content:
+            if token[1] == 'stream':
+                return False
+            if token[0] == CHAR_DELIMITER and EqualCanonical(token[1], keyword):
+                return True
+        return False
+
+    def StreamContains(self, keyword, filter, casesensitive, regex, overridingfilters):
         if not self.ContainsStream():
             return False
-        streamData = self.Stream(filter)
+        streamData = self.Stream(filter, overridingfilters)
         if filter and streamData == 'No filters':
-            streamData = self.Stream(False)
+            streamData = self.Stream(False, overridingfilters)
         if regex:
             return re.search(keyword, streamData, IIf(casesensitive, 0, re.I))
         elif casesensitive:
@@ -502,7 +567,7 @@ class cPDFElementIndirectObject:
         else:
             return keyword.lower() in streamData.lower()
 
-    def Stream(self, filter=True):
+    def Stream(self, filter=True, overridingfilters=''):
         state = 'start'
         countDirectories = 0
         data = ''
@@ -544,7 +609,12 @@ class cPDFElementIndirectObject:
             elif state == 'stream-concat':
                 if self.content[i][0] == CHAR_REGULAR and self.content[i][1] == 'endstream':
                     if filter:
-                        return self.Decompress(data, filters)
+                        if overridingfilters == '':
+                            return self.Decompress(data, filters)
+                        elif overridingfilters == 'raw':
+                            return data
+                        else:
+                            return self.Decompress(data, overridingfilters.split(' '))
                     else:
                         return data
                 else:
@@ -592,12 +662,12 @@ class cPDFElementIndirectObject:
         else:
             return data
 
-    def StreamYARAMatch(self, rules, decoders, decoderoptions, filter):
+    def StreamYARAMatch(self, rules, decoders, decoderoptions, filter, overridingfilters):
         if not self.ContainsStream():
             return None
-        streamData = self.Stream(filter)
+        streamData = self.Stream(filter, overridingfilters)
         if filter and streamData == 'No filters':
-            streamData = self.Stream(False)
+            streamData = self.Stream(False, overridingfilters)
 
         oDecoders = [cIdentity(streamData, None)]
         for cDecoder in decoders:
@@ -643,7 +713,7 @@ class cPDFParseDictionary:
         dataTrimmed = TrimLWhiteSpace(TrimRWhiteSpace(self.content))
         if dataTrimmed == []:
             self.parsed = None
-        elif self.isOpenDictionary(dataTrimmed[0]) and self.isCloseDictionary(dataTrimmed[-1]):
+        elif self.isOpenDictionary(dataTrimmed[0]) and (self.isCloseDictionary(dataTrimmed[-1]) or self.couldBeCloseDictionary(dataTrimmed[-1])):
             self.parsed = self.ParseDictionary(dataTrimmed)[0]
         else:
             self.parsed = None
@@ -653,6 +723,9 @@ class cPDFParseDictionary:
 
     def isCloseDictionary(self, token):
         return token[0] == CHAR_DELIMITER and token[1] == '>>'
+
+    def couldBeCloseDictionary(self, token):
+        return token[0] == CHAR_DELIMITER and token[1].rstrip().endswith('>>')
 
     def ParseDictionary(self, tokens):
         state = 0 # start
@@ -694,12 +767,25 @@ class cPDFParseDictionary:
                 elif value == [] and tokens[0][1] == '(':
                     value.append(tokens[0][1])
                 elif value != [] and value[0] == '(' and tokens[0][1] != ')':
-                    value.append(tokens[0][1])
+                    if tokens[0][1][0] == '%':
+                        tokens = [tokens[0]] + cPDFTokenizer(StringIO(tokens[0][1][1:])).Tokens() + tokens[1:]
+                        value.append('%')
+                    else:
+                        value.append(tokens[0][1])
                 elif value != [] and value[0] == '(' and tokens[0][1] == ')':
                     value.append(tokens[0][1])
-                    dictionary.append((key, value))
-                    value = []
-                    state = 1
+                    balanced = 0
+                    for item in value:
+                        if item == '(':
+                            balanced += 1
+                        elif item == ')':
+                            balanced -= 1
+                    if balanced < 0 and self.verbose:
+                        print('todo 11: ' + repr(value))
+                    if balanced < 1:
+                        dictionary.append((key, value))
+                        value = []
+                        state = 1
                 elif value != [] and tokens[0][1][0] == '/':
                     dictionary.append((key, value))
                     key = ConditionalCanonicalize(tokens[0][1], self.nocanonicalizedoutput)
@@ -749,7 +835,7 @@ class cPDFParseDictionary:
         for key, value in dictionary:
             if key == select:
                 return self.PrettyPrintSubElement('', [select, value])
-            if type(value) == type([]) and type(value[0]) == type((None,)):
+            if type(value) == type([]) and len(value) > 0 and type(value[0]) == type((None,)):
                 result = self.GetNestedSub(value, select)
                 if result !=None:
                     return self.PrettyPrintSubElement('', [select, result])
@@ -764,6 +850,8 @@ def FormatOutput(data, raw):
             return ''.join(map(lambda x: x[1], data))
         else:
             return data
+    elif sys.version_info[0] > 2:
+        return ascii(data)
     else:
         return repr(data)
 
@@ -787,7 +875,7 @@ def IfWIN32SetBinary(io):
 
 def PrintOutputObject(object, options):
     if options.dump == '-':
-        filtered = object.Stream(options.filter == True)
+        filtered = object.Stream(options.filter == True, options.overridingfilters)
         if filtered == []:
             filtered = ''
         IfWIN32SetBinary(sys.stdout)
@@ -795,6 +883,8 @@ def PrintOutputObject(object, options):
         return
 
     print('obj %d %d' % (object.id, object.version))
+    if object.objstm != None:
+        print(' Containing /ObjStm: %d %d' % object.objstm)
     print(' Type: %s' % ConditionalCanonicalize(object.GetType(), options.nocanonicalizedoutput))
     print(' Referencing: %s' % ', '.join(map(lambda x: '%s %s %s' % x, object.GetReferences())))
     dataPrecedingStream = object.ContainsStream()
@@ -805,11 +895,11 @@ def PrintOutputObject(object, options):
             print(' %s' % FormatOutput(dataPrecedingStream, options.raw))
         oPDFParseDictionary = cPDFParseDictionary(dataPrecedingStream, options.nocanonicalizedoutput)
         if options.hash:
-            streamContent = object.Stream(False)
+            streamContent = object.Stream(False, options.overridingfilters)
             print('  unfiltered')
             print('   len: %6d md5: %s' % (len(streamContent), hashlib.md5(streamContent).hexdigest()))
             print('   %s' % HexAsciiDumpLine(streamContent))
-            streamContent = object.Stream(True)
+            streamContent = object.Stream(True, options.overridingfilters)
             print('  filtered')
             print('   len: %6d md5: %s' % (len(streamContent), hashlib.md5(streamContent).hexdigest()))
             print('   %s' % HexAsciiDumpLine(streamContent))
@@ -822,14 +912,14 @@ def PrintOutputObject(object, options):
     oPDFParseDictionary.PrettyPrint('  ')
     print('')
     if options.filter and not options.dump:
-        filtered = object.Stream()
+        filtered = object.Stream(overridingfilters=options.overridingfilters)
         if filtered == []:
             print(' %s' % FormatOutput(object.content, options.raw))
         else:
             print(' %s' % FormatOutput(filtered, options.raw))
     if options.content:
         if object.ContainsStream():
-            stream = object.Stream(False)
+            stream = object.Stream(False, options.overridingfilters)
             if stream != []:
                 print(' %s' % FormatOutput(stream, options.raw))
         else:
@@ -837,7 +927,7 @@ def PrintOutputObject(object, options):
 
 
     if options.dump:
-        filtered = object.Stream(options.filter == True)
+        filtered = object.Stream(options.filter == True, options.overridingfilters)
         if filtered == []:
             filtered = ''
         try:
@@ -1040,9 +1130,9 @@ def PrintGenerateObject(object, options, newId=None):
     dataPrecedingStream = object.ContainsStream()
     if dataPrecedingStream:
         if options.filter:
-            decompressed = object.Stream(True)
+            decompressed = object.Stream(True, options.overridingfilters)
             if decompressed == 'No filters' or decompressed.startswith('Unsupported filter: '):
-                print('    oPDF.stream(%d, %d, %s, %s)' % (objectId, object.version, repr(object.Stream(False).rstrip()), repr(re.sub('/Length\s+\d+', '/Length %d', FormatOutput(dataPrecedingStream, True)).strip())))
+                print('    oPDF.stream(%d, %d, %s, %s)' % (objectId, object.version, repr(object.Stream(False, options.overridingfilters).rstrip()), repr(re.sub('/Length\s+\d+', '/Length %d', FormatOutput(dataPrecedingStream, True)).strip())))
             else:
                 dictionary = FormatOutput(dataPrecedingStream, True)
                 dictionary = re.sub(r'/Length\s+\d+', '', dictionary)
@@ -1053,7 +1143,7 @@ def PrintGenerateObject(object, options, newId=None):
                 dictionary = dictionary.strip()
                 print("    oPDF.stream2(%d, %d, %s, %s, 'f')" % (objectId, object.version, repr(decompressed.rstrip()), repr(dictionary)))
         else:
-            print('    oPDF.stream(%d, %d, %s, %s)' % (objectId, object.version, repr(object.Stream(False).rstrip()), repr(re.sub('/Length\s+\d+', '/Length %d', FormatOutput(dataPrecedingStream, True)).strip())))
+            print('    oPDF.stream(%d, %d, %s, %s)' % (objectId, object.version, repr(object.Stream(False, options.overridingfilters).rstrip()), repr(re.sub('/Length\s+\d+', '/Length %d', FormatOutput(dataPrecedingStream, True)).strip())))
     else:
         print('    oPDF.indirectobject(%d, %d, %s)' % (objectId, object.version, repr(FormatOutput(object.content, True).strip())))
 
@@ -1085,17 +1175,30 @@ def ProcessAt(argument):
     else:
         return [argument]
 
-def YARACompile(fileordirname):
-    dFilepaths = {}
-    if os.path.isdir(fileordirname):
-        for root, dirs, files in os.walk(fileordirname):
-            for file in files:
-                filename = os.path.join(root, file)
-                dFilepaths[filename] = filename
+def YARACompile(ruledata):
+    if ruledata.startswith('#'):
+        if ruledata.startswith('#h#'):
+            rule = binascii.a2b_hex(ruledata[3:])
+        elif ruledata.startswith('#b#'):
+            rule = binascii.a2b_base64(ruledata[3:])
+        elif ruledata.startswith('#s#'):
+            rule = 'rule string {strings: $a = "%s" ascii wide nocase condition: $a}' % ruledata[3:]
+        elif ruledata.startswith('#q#'):
+            rule = ruledata[3:].replace("'", '"')
+        else:
+            rule = ruledata[1:]
+        return yara.compile(source=rule)
     else:
-        for filename in ProcessAt(fileordirname):
-            dFilepaths[filename] = filename
-    return yara.compile(filepaths=dFilepaths)
+        dFilepaths = {}
+        if os.path.isdir(ruledata):
+            for root, dirs, files in os.walk(ruledata):
+                for file in files:
+                    filename = os.path.join(root, file)
+                    dFilepaths[filename] = filename
+        else:
+            for filename in ProcessAt(ruledata):
+                dFilepaths[filename] = filename
+        return yara.compile(filepaths=dFilepaths)
 
 def AddDecoder(cClass):
     global decoders
@@ -1105,10 +1208,16 @@ def AddDecoder(cClass):
 class cDecoderParent():
     pass
 
+def GetScriptPath():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    else:
+        return os.path.dirname(sys.argv[0])
+
 def LoadDecoders(decoders, verbose):
     if decoders == '':
         return
-    scriptPath = os.path.dirname(sys.argv[0])
+    scriptPath = GetScriptPath()
     for decoder in sum(map(ProcessAt, decoders.split(',')), []):
         try:
             if not decoder.lower().endswith('.py'):
@@ -1192,6 +1301,27 @@ def HexAsciiDump(data):
 def HexAsciiDumpLine(data):
     return HexAsciiDump(data[0:16])[10:-1]
 
+def ParseINIFile():
+    oConfigParser = ConfigParser.ConfigParser(allow_no_value=True)
+    oConfigParser.optionxform = str
+    oConfigParser.read(os.path.join(GetScriptPath(), 'pdfid.ini'))
+    keywords = []
+    if oConfigParser.has_section('keywords'):
+        for key, value in oConfigParser.items('keywords'):
+            if not key in keywords:
+                keywords.append(key)
+    return keywords
+
+def MatchObjectID(id, selection):
+    return str(id) in selection.split(',')
+
+def GetArguments():
+    arguments = sys.argv[1:]
+    envvar = os.getenv('PDFPARSER_OPTIONS')
+    if envvar == None:
+        return arguments
+    return envvar.split(' ') + arguments
+
 def Main():
     """pdf-parser, use it to parse a PDF document
     """
@@ -1199,14 +1329,16 @@ def Main():
     global decoders
 
     oParser = optparse.OptionParser(usage='usage: %prog [options] pdf-file|zip-file|url\n' + __description__, version='%prog ' + __version__)
+    oParser.add_option('-m', '--man', action='store_true', default=False, help='Print manual')
     oParser.add_option('-s', '--search', help='string to search in indirect objects (except streams)')
     oParser.add_option('-f', '--filter', action='store_true', default=False, help='pass stream object through filters (FlateDecode, ASCIIHexDecode, ASCII85Decode, LZWDecode and RunLengthDecode only)')
-    oParser.add_option('-o', '--object', help='id of indirect object to select (version independent)')
+    oParser.add_option('-o', '--object', help='id(s) of indirect object(s) to select, use comma (,) to separate ids (version independent)')
     oParser.add_option('-r', '--reference', help='id of indirect object being referenced (version independent)')
     oParser.add_option('-e', '--elements', help='type of elements to select (cxtsi)')
     oParser.add_option('-w', '--raw', action='store_true', default=False, help='raw output for data and filters')
     oParser.add_option('-a', '--stats', action='store_true', default=False, help='display stats for pdf document')
     oParser.add_option('-t', '--type', help='type of indirect object to select')
+    oParser.add_option('-O', '--objstm', action='store_true', default=False, help='parse stream of /ObjStm objects')
     oParser.add_option('-v', '--verbose', action='store_true', default=False, help='display malformed PDF elements')
     oParser.add_option('-x', '--extract', help='filename to extract malformed content to')
     oParser.add_option('-H', '--hash', action='store_true', default=False, help='display hash of objects')
@@ -1218,6 +1350,7 @@ def Main():
     oParser.add_option('--unfiltered', action='store_true', default=False, help='search in unfiltered streams')
     oParser.add_option('--casesensitive', action='store_true', default=False, help='case sensitive search in streams')
     oParser.add_option('--regex', action='store_true', default=False, help='use regex to search in streams')
+    oParser.add_option('--overridingfilters', type=str, default='', help='override filters with given filters (use raw for the raw stream content)')
     oParser.add_option('-g', '--generate', action='store_true', default=False, help='generate a Python program that creates the parsed PDF file')
     oParser.add_option('--generateembedded', type=int, default=0, help='generate a Python program that embeds the selected indirect object as a file')
     oParser.add_option('-y', '--yara', help='YARA rule (or directory or @file) to check streams (can be used with option --unfiltered)')
@@ -1225,7 +1358,12 @@ def Main():
     oParser.add_option('--decoders', type=str, default='', help='decoders to load (separate decoders with a comma , ; @file supported)')
     oParser.add_option('--decoderoptions', type=str, default='', help='options for the decoder')
     oParser.add_option('-k', '--key', help='key to search in dictionaries')
-    (options, args) = oParser.parse_args()
+    (options, args) = oParser.parse_args(GetArguments())
+
+    if options.man:
+        oParser.print_help()
+        PrintManual()
+        return 0
 
     if len(args) != 1:
         oParser.print_help()
@@ -1246,6 +1384,16 @@ def Main():
         cntStartXref = 0
         cntIndirectObject = 0
         dicObjectTypes = {}
+        keywords = ['/JS', '/JavaScript', '/AA', '/OpenAction', '/AcroForm', '/RichMedia', '/Launch', '/EmbeddedFile', '/XFA', '/URI']
+        for extrakeyword in ParseINIFile():
+            if not extrakeyword in keywords:
+                keywords.append(extrakeyword)
+
+#        dKeywords = {keyword: [] for keyword in keywords}
+# Done for compatibility with 2.6.6
+        dKeywords = {}
+        for keyword in keywords:
+            dKeywords[keyword] = []
 
         selectComment = False
         selectXref = False
@@ -1274,7 +1422,7 @@ def Main():
                 selectXref = True
                 selectTrailer = True
                 selectStartXref = True
-            if options.search or options.key:
+            if options.search or options.key or options.reference:
                 selectTrailer = True
 
         if options.type == '-':
@@ -1323,8 +1471,35 @@ def Main():
                 return
             rules = YARACompile(options.yara)
 
+        oPDFParserOBJSTM = None
         while True:
-            object = oPDFParser.GetObject()
+            if oPDFParserOBJSTM == None:
+                object = oPDFParser.GetObject()
+            else:
+                object = oPDFParserOBJSTM.GetObject()
+                if object == None:
+                    oPDFParserOBJSTM = None
+                    object = oPDFParser.GetObject()
+            if options.objstm and hasattr(object, 'GetType') and EqualCanonical(object.GetType(), '/ObjStm') and object.ContainsStream():
+                # parsing objects inside an /ObjStm object by extracting & parsing the stream content to create a synthesized PDF document, that is then parsed by cPDFParser
+                oPDFParseDictionary = cPDFParseDictionary(object.ContainsStream(), options.nocanonicalizedoutput)
+                numberOfObjects = int(oPDFParseDictionary.Get('/N')[0])
+                offsetFirstObject = int(oPDFParseDictionary.Get('/First')[0])
+                indexes = list(map(int, C2SIP3(object.Stream())[:offsetFirstObject].strip().split(' ')))
+                if len(indexes) % 2 != 0 or len(indexes) / 2 != numberOfObjects:
+                    raise Exception('Error in index of /ObjStm stream')
+                streamObject = C2SIP3(object.Stream()[offsetFirstObject:])
+                synthesizedPDF = ''
+                while len(indexes) > 0:
+                    objectNumber = indexes[0]
+                    offset = indexes[1]
+                    indexes = indexes[2:]
+                    if len(indexes) >= 2:
+                        offsetNextObject = indexes[1]
+                    else:
+                        offsetNextObject = len(streamObject)
+                    synthesizedPDF += '%d 0 obj\n%s\nendobj\n' % (objectNumber, streamObject[offset:offsetNextObject])
+                oPDFParserOBJSTM = cPDFParser(StringIO(synthesizedPDF), options.verbose, options.extract, (object.id, object.version))
             if object != None:
                 if options.stats:
                     if object.type == PDF_ELEMENT_COMMENT:
@@ -1342,6 +1517,9 @@ def Main():
                             dicObjectTypes[type1] = [object.id]
                         else:
                             dicObjectTypes[type1].append(object.id)
+                        for keyword in dKeywords.keys():
+                            if object.ContainsName(keyword):
+                                dKeywords[keyword].append(object.id)
                 else:
                     if object.type == PDF_ELEMENT_COMMENT and selectComment:
                         if options.generate:
@@ -1367,7 +1545,7 @@ def Main():
                             if result != None:
                                 savedRoot = result
                         elif options.yara == None and options.generateembedded == 0:
-                            if not options.search and not options.key or options.search and object.Contains(options.search):
+                            if not options.search and not options.key and not options.reference or options.search and object.Contains(options.search):
                                 if oPDFParseDictionary == None:
                                     print('trailer %s' % FormatOutput(object.content, options.raw))
                                 else:
@@ -1379,6 +1557,11 @@ def Main():
                                     result = oPDFParseDictionary.GetNested(options.key)
                                     if result != None:
                                         print(result)
+                            elif options.reference:
+                                for key, value in oPDFParseDictionary.Retrieve():
+                                    if value == [str(options.reference), '0', 'R']:
+                                        print('trailer')
+                                        oPDFParseDictionary.PrettyPrint('  ')
                     elif object.type == PDF_ELEMENT_STARTXREF and selectStartXref:
                         if not options.generate and options.yara == None and options.generateembedded == 0:
                             print('startxref %d' % object.index)
@@ -1388,13 +1571,16 @@ def Main():
                             if object.Contains(options.search):
                                 PrintObject(object, options)
                         elif options.key:
-                            oPDFParseDictionary = cPDFParseDictionary(object.content[1:], options.nocanonicalizedoutput)
+                            contentDictionary = object.ContainsStream()
+                            if not contentDictionary:
+                                contentDictionary = object.content[1:]
+                            oPDFParseDictionary = cPDFParseDictionary(contentDictionary, options.nocanonicalizedoutput)
                             if oPDFParseDictionary.parsed != None:
                                 result = oPDFParseDictionary.GetNested(options.key)
                                 if result != None:
                                     print(result)
                         elif options.object:
-                            if object.id == eval(options.object):
+                            if MatchObjectID(object.id, options.object):
                                 PrintObject(object, options)
                         elif options.reference:
                             if object.References(options.reference):
@@ -1405,13 +1591,13 @@ def Main():
                         elif options.hash:
                             print('obj %d %d' % (object.id, object.version))
                             rawContent = FormatOutput(object.content, True)
-                            print(' len: %d md5: %s' % (len(rawContent), hashlib.md5(rawContent.encode()).hexdigest()))
+                            print(' len: %d md5: %s' % (len(rawContent), hashlib.md5(rawContent).hexdigest()))
                             print('')
                         elif options.searchstream:
-                            if object.StreamContains(options.searchstream, not options.unfiltered, options.casesensitive, options.regex):
+                            if object.StreamContains(options.searchstream, not options.unfiltered, options.casesensitive, options.regex, options.overridingfilters):
                                 PrintObject(object, options)
                         elif options.yara != None:
-                            results = object.StreamYARAMatch(rules, decoders, options.decoderoptions, not options.unfiltered)
+                            results = object.StreamYARAMatch(rules, decoders, options.decoderoptions, not options.unfiltered, options.overridingfilters)
                             if results != None and results != []:
                                 for result in results:
                                     for yaraResult in result[1]:
@@ -1446,16 +1632,19 @@ def Main():
             print('Trailer: %s' % cntTrailer)
             print('StartXref: %s' % cntStartXref)
             print('Indirect object: %s' % cntIndirectObject)
-            names = dicObjectTypes.keys()
-            for key in sorted(names):
+            for key in sorted(dicObjectTypes.keys()):
                 print(' %s %d: %s' % (key, len(dicObjectTypes[key]), ', '.join(map(lambda x: '%d' % x, dicObjectTypes[key]))))
+            if sum(map(len, dKeywords.values())) > 0:
+                print('Search keywords:')
+                for keyword in keywords:
+                    if len(dKeywords[keyword]) > 0:
+                        print(' %s %d: %s' % (keyword, len(dKeywords[keyword]), ', '.join(map(lambda x: '%d' % x, dKeywords[keyword]))))
 
         if options.generate or options.generateembedded != 0:
             print("    oPDF.xrefAndTrailer('%s')" % ' '.join(savedRoot))
             print('')
             print("if __name__ == '__main__':")
             print('    Main()')
-
 
 def TestPythonVersion(enforceMaximumVersion=False, enforceMinimumVersion=False):
     if sys.version_info[0:3] > __maximum_python_version__:
