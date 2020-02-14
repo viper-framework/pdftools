@@ -5,6 +5,8 @@
 #2015/08/13 added instructions
 #2017/10/29 added /URI
 
+from .pdfid import cPluginParent, AddPlugin
+
 class cPDFiDTriage(cPluginParent):
     onlyValidPDF = False
     name = 'Triage plugin'
